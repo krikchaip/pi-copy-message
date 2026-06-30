@@ -95,13 +95,13 @@ Copy with role and timestamp metadata instead of raw text only:
 | Configured `tui.select.down` (default: `↓`) | Move to newer visible message |
 | `Home` | Jump to oldest visible message |
 | `End` | Jump to newest visible message |
+| `←` / `→` | Scroll the selected message preview up/down |
 | Type text | Filter visible messages |
 | `time:<term>` | Search timestamps |
 | `Backspace` | Delete one search character |
 | `Ctrl+U` | Toggle user messages |
 | `Ctrl+A` | Toggle assistant messages |
 | `Ctrl+T` | Toggle tool/bash messages |
-| `Tab` | Toggle a wrapped preview of the selected message |
 | `Alt+M` | Toggle raw vs metadata copy format |
 | Configured `tui.select.confirm` (default: `Enter`) | Copy selected message text |
 | Configured `tui.select.cancel` (default: `Esc`/`Ctrl+C`) | Cancel |
@@ -110,6 +110,7 @@ Copy with role and timestamp metadata instead of raw text only:
 
 - Entry IDs are hidden from the picker.
 - The picker caps visible rows and scrolls instead of filling the screen.
+- The selected message preview is always shown unless the terminal is too short.
 - Search preserves your original selected message and restores it when the search is cleared.
 - General search does not match timestamps; use `time:<term>` when you want to search by displayed time.
 - Filter labels honor the active pi theme.

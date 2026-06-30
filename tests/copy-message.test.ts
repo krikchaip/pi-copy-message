@@ -253,30 +253,33 @@ assert.deepEqual(
 	assert.equal(state.handleInput("\x1bm"), "render");
 	assert.equal(state.format, "metadata");
 	assert.match(state.selectedCopyText() ?? "", /^assistant at .*: gamma final answer$/);
-	assert.equal(state.handleInput("\t"), "render");
-	assert.equal(state.peek, true);
-	assert.ok(state.render(60, plainTheme).some((line) => line.includes("Peek metadata assistant message")));
+	assert.equal(state.handleInput("\t"), "none");
+	assert.ok(state.render(60, plainTheme).some((line) => line.includes("Preview metadata assistant message")));
+	assert.ok(state.render(60, plainTheme).some((line) => line.includes("←/→ preview")));
 	assert.equal(state.handleInput("\r"), "copy");
 }
 
 {
 	const state = new CopyMessagePickerState([copyableMessage("u0", "user", "first", 0)]);
-	const hints60 = state.render(60, plainTheme).at(-2) ?? "";
-	const hints80 = state.render(80, plainTheme).at(-2) ?? "";
+	const lines60 = state.render(60, plainTheme);
+	const lines80 = state.render(80, plainTheme);
+	const hints60 = lines60.join("\n");
+	const hints80 = lines80.join("\n");
 
-	assert.ok(hints60.length <= 60);
+	assert.ok(lines60.every((line) => visibleWidth(line) <= 60));
+	assert.match(hints60, /←\/→ preview/);
 	assert.match(hints60, /up\/down nav/);
 	assert.match(hints60, /enter copy/);
 	assert.match(hints60, /escape\/ctrl\+c cancel/);
-	assert.match(hints60, /Tab peek/);
-	assert.doesNotMatch(hints60, /type search|Home\/End jump|filters|Alt\+M meta/);
+	assert.doesNotMatch(hints60, /Tab peek/);
 
-	assert.ok(hints80.length <= 80);
+	assert.ok(lines80.every((line) => visibleWidth(line) <= 80));
+	assert.match(hints80, /←\/→ preview/);
 	assert.match(hints80, /up older · down newer/);
 	assert.match(hints80, /enter copy/);
 	assert.match(hints80, /escape\/ctrl\+c cancel/);
 	assert.match(hints80, /type search/);
-	assert.doesNotMatch(hints80, /Home\/End jump|Tab peek|filters|Alt\+M meta/);
+	assert.doesNotMatch(hints80, /Tab peek/);
 }
 
 {
@@ -309,17 +312,19 @@ assert.deepEqual(
 	assert.equal(state.selectedMessage()?.id, "a0");
 	assert.equal(state.visibility.showAssistant, true);
 	assert.equal(state.handleInput("\t", keybindings), "copy");
-	assert.equal(state.peek, false);
 	assert.equal(state.handleInput("\x1bm", keybindings), "cancel");
 	assert.equal(state.format, "raw");
 
-	const hints60 = state.render(60, plainTheme, keybindings).at(-2) ?? "";
-	const hints80 = state.render(80, plainTheme, keybindings).at(-2) ?? "";
-	for (const [width, hints] of [
-		[60, hints60],
-		[80, hints80],
+	const lines60 = state.render(60, plainTheme, keybindings);
+	const lines80 = state.render(80, plainTheme, keybindings);
+	const hints60 = lines60.join("\n");
+	const hints80 = lines80.join("\n");
+	for (const [width, lines, hints] of [
+		[60, lines60, hints60],
+		[80, lines80, hints80],
 	] as const) {
-		assert.ok(hints.length <= width);
+		assert.ok(lines.every((line) => visibleWidth(line) <= width));
+		assert.match(hints, /←\/→ preview/);
 		assert.match(hints, /ctrl\+t/);
 		assert.match(hints, /ctrl\+a/);
 		assert.match(hints, /tab copy/);
@@ -346,8 +351,9 @@ assert.deepEqual(
 	} as never;
 
 	for (const width of [60, 80]) {
-		const hints = state.render(width, plainTheme, keybindings).at(-2) ?? "";
-		assert.ok(hints.length <= width);
+		const lines = state.render(width, plainTheme, keybindings);
+		const hints = lines.join("\n");
+		assert.ok(lines.every((line) => visibleWidth(line) <= width));
 		assert.match(hints, /up/);
 		assert.match(hints, /down/);
 		assert.match(hints, /enter copy/);
@@ -402,6 +408,24 @@ assert.deepEqual(
 	press(state, "\x7f\x7f\x7f\x7f\x7f\x7f\x7f\x7f\x7f");
 	assert.equal(state.search, "");
 	assert.equal(state.selectedMessage()?.text, "raw assistant message 9");
+}
+
+{
+	const messages = [
+		copyableMessage("a0", "assistant", "older assistant message", 0),
+		copyableMessage("a1", "assistant", Array.from({ length: 15 }, (_, index) => `line${index}`).join("\n"), 1),
+	];
+	const state = new CopyMessagePickerState(messages);
+
+	assert.equal(state.handleInput("\x1b[C"), "render");
+	assert.equal(state.previewScroll, 1);
+	assert.ok(state.render(80, plainTheme, 100).some((line) => line.includes("Preview raw assistant message 2-9/")));
+	assert.equal(state.handleInput("\x1b[D"), "render");
+	assert.equal(state.previewScroll, 0);
+	assert.equal(state.handleInput("\x1b[C"), "render");
+	assert.equal(state.handleInput("\x1b[A"), "render");
+	assert.equal(state.previewScroll, 0);
+	assert.ok(!state.render(60, plainTheme, 10).some((line) => line.includes("Preview raw assistant message")));
 }
 
 {

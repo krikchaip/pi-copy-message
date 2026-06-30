@@ -4,7 +4,8 @@ import type { AutocompleteItem } from "@earendil-works/pi-tui";
 import { matchesKey, truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 
 const MAX_VISIBLE_MESSAGES = 8;
-const MAX_PEEK_LINES = 16;
+const PREVIEW_LINES = 8;
+const MIN_TERMINAL_ROWS_FOR_PREVIEW = 24;
 
 export type CopyFormat = "raw" | "metadata";
 
@@ -349,16 +350,8 @@ function renderMessageLine(
 	return preview ? `${meta}  ${styledPreview}` : meta;
 }
 
-function renderPeekLines(message: CopyableMessage, width: number, theme: CopyMessageTheme, format: CopyFormat): string[] {
-	const contentWidth = Math.max(1, width - 2);
-	const text = formatMessageForCopy(message, format);
-	const wrapped = wrapTextWithAnsi(styleRoleText(theme, message.role, text, false), contentWidth);
-	const shown = wrapped.slice(0, MAX_PEEK_LINES);
-	const remaining = wrapped.length - shown.length;
-	const title = theme.fg("dim", `Peek ${format === "metadata" ? "metadata" : "raw"} ${roleLabel(message.role)} message`);
-	const lines = [title, ...shown.map((line) => `  ${line}`)];
-	if (remaining > 0) lines.push(theme.fg("dim", `  … ${remaining} more wrapped line${remaining === 1 ? "" : "s"}`));
-	return lines;
+function borderLine(width: number, theme: CopyMessageTheme): string {
+	return theme.fg("accent", "─".repeat(Math.max(1, width)));
 }
 
 type PickerKeybindings = Pick<KeybindingsManager, "getKeys" | "matches">;
@@ -370,7 +363,29 @@ function bindingHint(keybindings: PickerKeybindings | undefined, action: "up" | 
 	return keys.reduce((shortest, key) => visibleWidth(key) < visibleWidth(shortest) ? key : shortest, keys[0] ?? "unbound");
 }
 
-function helpLines(width: number, keybindings?: PickerKeybindings): string[] {
+function shouldShowPreview(terminalRows: number | undefined): boolean {
+	return terminalRows === undefined || terminalRows >= MIN_TERMINAL_ROWS_FOR_PREVIEW;
+}
+
+function previewWrappedLines(message: CopyableMessage, width: number, theme: CopyMessageTheme, format: CopyFormat): string[] {
+	const contentWidth = Math.max(1, width - 2);
+	const text = formatMessageForCopy(message, format);
+	return wrapTextWithAnsi(styleRoleText(theme, message.role, text, false), contentWidth);
+}
+
+function renderPreviewLines(message: CopyableMessage, width: number, theme: CopyMessageTheme, format: CopyFormat, scroll: number): string[] {
+	const wrapped = previewWrappedLines(message, width, theme, format);
+	const start = Math.max(0, Math.min(scroll, Math.max(0, wrapped.length - PREVIEW_LINES)));
+	const shown = wrapped.slice(start, start + PREVIEW_LINES);
+	while (shown.length < PREVIEW_LINES) shown.push("");
+
+	const scrollPosition =
+		wrapped.length > PREVIEW_LINES ? ` ${start + 1}-${Math.min(start + PREVIEW_LINES, wrapped.length)}/${wrapped.length}` : "";
+	const title = theme.fg("dim", `Preview ${format === "metadata" ? "metadata" : "raw"} ${roleLabel(message.role)} message${scrollPosition}`);
+	return [title, ...shown.map((line) => `  ${line}`)];
+}
+
+function helpLines(width: number, keybindings: PickerKeybindings | undefined, showPreview: boolean): string[] {
 	const up = bindingHint(keybindings, "up");
 	const down = bindingHint(keybindings, "down");
 	const confirm = bindingHint(keybindings, "confirm");
@@ -381,7 +396,7 @@ function helpLines(width: number, keybindings?: PickerKeybindings): string[] {
 			keybindings.matches(data, "tui.select.down") ||
 			keybindings.matches(data, "tui.select.confirm") ||
 			keybindings.matches(data, "tui.select.cancel"));
-	const peek = available("\t") ? "Tab peek" : undefined;
+	const preview = showPreview && available("\x1b[D") && available("\x1b[C") ? "←/→ preview" : undefined;
 	const filters = [
 		{ hint: "U", data: "\x15" },
 		{ hint: "A", data: "\x01" },
@@ -396,6 +411,7 @@ function helpLines(width: number, keybindings?: PickerKeybindings): string[] {
 	const jumpHint = jumps.length > 0 ? `${jumps.map(({ hint }) => hint).join("/")} jump` : undefined;
 	const join = (...hints: Array<string | undefined>) => hints.filter(Boolean).join(" · ");
 	const core = width < 74 ? [`${up}/${down} nav`, `${confirm} copy`, `${cancel} cancel`] : [`${up} older`, `${down} newer`, `${confirm} copy`, `${cancel} cancel`];
+	const previewLines = preview ? [preview] : [];
 	const optional: string[] = [];
 
 	if (visibleWidth(join(...core)) > width) {
@@ -405,14 +421,14 @@ function helpLines(width: number, keybindings?: PickerKeybindings): string[] {
 			if (lines.length === 0 || visibleWidth(candidate) > width) lines.push(hint);
 			else lines[lines.length - 1] = candidate;
 		}
-		return lines;
+		return [...previewLines, ...lines];
 	}
 
-	for (const hint of width < 74 ? [jumpHint, peek, filterHint, meta] : ["type search", jumpHint, peek, filterHint, meta]) {
+	for (const hint of width < 74 ? [jumpHint, filterHint, meta] : ["type search", jumpHint, filterHint, meta]) {
 		if (hint && visibleWidth(join(...optional, hint, ...core)) <= width) optional.push(hint);
 	}
 
-	return [join(...optional, ...core)];
+	return [...previewLines, join(...optional, ...core)];
 }
 
 type PickerInputResult = "copy" | "cancel" | "render" | "none";
@@ -427,7 +443,7 @@ export class CopyMessagePickerState {
 	visibleMessages: CopyableMessage[];
 	selectedIndex: number;
 	format: CopyFormat;
-	peek = false;
+	previewScroll = 0;
 	private searchAnchorId: string | undefined;
 
 	constructor(private readonly messages: CopyableMessage[], initialFormat: CopyFormat = "raw") {
@@ -445,7 +461,9 @@ export class CopyMessagePickerState {
 		return selected ? formatMessageForCopy(selected, this.format) : undefined;
 	}
 
-	render(width: number, theme: CopyMessageTheme, keybindings?: PickerKeybindings): string[] {
+	render(width: number, theme: CopyMessageTheme, keybindingsOrTerminalRows?: PickerKeybindings | number, terminalRows = process.stdout.rows): string[] {
+		const keybindings = typeof keybindingsOrTerminalRows === "number" ? undefined : keybindingsOrTerminalRows;
+		const previewTerminalRows = typeof keybindingsOrTerminalRows === "number" ? keybindingsOrTerminalRows : terminalRows;
 		const maxVisible = Math.min(this.visibleMessages.length, MAX_VISIBLE_MESSAGES);
 		const start = maxVisible === 0 ? 0 : Math.max(0, Math.min(this.selectedIndex - maxVisible + 1, this.visibleMessages.length - maxVisible));
 		const end = Math.min(this.visibleMessages.length, start + maxVisible);
@@ -454,8 +472,15 @@ export class CopyMessagePickerState {
 		const toolState = filterLabel(theme, "tools", this.visibility.showTools, "dim");
 		const searchState = this.search ? theme.fg("accent", `search “${this.search}”`) : theme.fg("dim", "type to filter");
 		const formatState = theme.fg(this.format === "metadata" ? "accent" : "dim", this.format === "metadata" ? "copy metadata" : "copy raw");
+		const selected = this.selectedMessage();
+		const showPreview = Boolean(selected) && shouldShowPreview(previewTerminalRows);
 
-		const lines = [theme.bold(theme.fg("accent", "Copy message")), ""];
+		const lines = [
+			borderLine(width, theme),
+			theme.bold(theme.fg("accent", "Copy message")),
+			...helpLines(width, keybindings, showPreview).map((line) => hotkeyHint(theme, line)),
+			"",
+		];
 
 		if (this.visibleMessages.length === 0) {
 			lines.push(theme.fg("warning", this.search ? "No messages match current filters and search." : "No messages visible with current filters."));
@@ -467,17 +492,17 @@ export class CopyMessagePickerState {
 			}
 		}
 
-		const selected = this.selectedMessage();
-		if (this.peek && selected) {
+		if (showPreview && selected) {
+			const maxPreviewScroll = Math.max(0, previewWrappedLines(selected, width, theme, this.format).length - PREVIEW_LINES);
+			this.previewScroll = Math.max(0, Math.min(this.previewScroll, maxPreviewScroll));
 			lines.push("");
-			lines.push(...renderPeekLines(selected, width, theme, this.format));
+			lines.push(borderLine(width, theme));
+			lines.push(...renderPreviewLines(selected, width, theme, this.format, this.previewScroll));
 		}
 
 		const position = this.visibleMessages.length === 0 ? "0/0" : `${this.selectedIndex + 1}/${this.visibleMessages.length}`;
 		lines.push(`${theme.fg("dim", `(${position})`)} · ${userState} · ${assistantState} · ${toolState} · ${formatState} · ${searchState}`);
-		lines.push("");
-		lines.push(...helpLines(width, keybindings).map((line) => hotkeyHint(theme, line)));
-		lines.push("");
+		lines.push(borderLine(width, theme));
 		return lines.map((line) => truncateToWidth(line, width, ""));
 	}
 
@@ -513,10 +538,6 @@ export class CopyMessagePickerState {
 			this.format = this.format === "raw" ? "metadata" : "raw";
 			return "render";
 		}
-		if (matchesKey(data, "tab")) {
-			this.peek = !this.peek;
-			return "render";
-		}
 		if (matchesKey(data, "backspace") || data === "\x7f") {
 			this.setSearch(this.search.slice(0, -1));
 			return "render";
@@ -531,6 +552,14 @@ export class CopyMessagePickerState {
 		}
 		if (!keybindings && matchesKey(data, "down")) {
 			this.move(1);
+			return "render";
+		}
+		if (matchesKey(data, "left")) {
+			this.scrollPreview(-1);
+			return "render";
+		}
+		if (matchesKey(data, "right")) {
+			this.scrollPreview(1);
 			return "render";
 		}
 		if (matchesKey(data, "home")) {
@@ -554,7 +583,9 @@ export class CopyMessagePickerState {
 		const selectedId = preferredId ?? this.visibleMessages[this.selectedIndex]?.id;
 		this.visibleMessages = filteredMessages(this.messages, this.visibility, this.search);
 		const nextIndex = selectedId ? this.visibleMessages.findIndex((message) => message.id === selectedId) : -1;
-		this.selectedIndex = nextIndex >= 0 ? nextIndex : Math.max(0, this.visibleMessages.length - 1);
+		const nextSelectedIndex = nextIndex >= 0 ? nextIndex : Math.max(0, this.visibleMessages.length - 1);
+		if (nextSelectedIndex !== this.selectedIndex) this.previewScroll = 0;
+		this.selectedIndex = nextSelectedIndex;
 	}
 
 	private setSearch(nextSearch: string) {
@@ -576,17 +607,27 @@ export class CopyMessagePickerState {
 
 	private move(delta: number) {
 		if (this.visibleMessages.length === 0) return;
-		this.selectedIndex = Math.max(0, Math.min(this.visibleMessages.length - 1, this.selectedIndex + delta));
+		const nextIndex = Math.max(0, Math.min(this.visibleMessages.length - 1, this.selectedIndex + delta));
+		if (nextIndex !== this.selectedIndex) this.previewScroll = 0;
+		this.selectedIndex = nextIndex;
+	}
+
+	private scrollPreview(delta: number) {
+		if (this.visibleMessages.length === 0) return;
+		this.previewScroll = Math.max(0, this.previewScroll + delta);
 	}
 
 	private jumpToTop() {
 		if (this.visibleMessages.length === 0) return;
+		if (this.selectedIndex !== 0) this.previewScroll = 0;
 		this.selectedIndex = 0;
 	}
 
 	private jumpToBottom() {
 		if (this.visibleMessages.length === 0) return;
-		this.selectedIndex = this.visibleMessages.length - 1;
+		const nextIndex = this.visibleMessages.length - 1;
+		if (this.selectedIndex !== nextIndex) this.previewScroll = 0;
+		this.selectedIndex = nextIndex;
 	}
 }
 
@@ -631,7 +672,7 @@ async function pickMessage(ctx: ExtensionCommandContext, messages: CopyableMessa
 		const state = new CopyMessagePickerState(messages, initialFormat);
 		return {
 			render(width: number) {
-				return state.render(width, theme, keybindings);
+				return state.render(width, theme, keybindings, tui.terminal.rows);
 			},
 			invalidate() {},
 			handleInput(data: string) {
